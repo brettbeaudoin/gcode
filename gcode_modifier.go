@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -19,24 +21,48 @@ const (
 	PERIM_PCT_CHG_UPPER       = -50.0
 	PERIM_PCT_CHG_LOWER       = -95.0
 	MIN_PROB_LAYER            = 20 // Ignore "problematic" layers below this
-	FAN_SPEED_PCT_PROB_LAYERS = 10 // Percent
-	TEMP_INCREASE_PROB_LAYERS = 10 // Celcius
+	FAN_SPEED_PCT_PROB_LAYERS = 1  // Percent
+	TEMP_INCREASE_PROB_LAYERS = 20 // Celcius
 )
 
 func main() {
 	// Define command-line flags
 	inputFilePath := flag.String("f", "", "Path to the input G-code file")
+	dirPath := flag.String("d", "", "Path directory of G-code files")
 	overwrite := flag.Bool("o", false, "Overwrite existing G-code file (Default=false)")
 
 	flag.Parse()
 
-	if *inputFilePath == "" {
+	if *inputFilePath == "" && *dirPath == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
 
+	if *dirPath != "" {
+		filepath.WalkDir(*dirPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if !d.IsDir() && strings.HasSuffix(d.Name(), ".gcode") && !strings.HasSuffix(d.Name(), "_modified.gcode") {
+				fullPath := filepath.Join(*dirPath, d.Name())
+				processFile(fullPath, *overwrite)
+				fmt.Println(fullPath)
+			}
+			return nil
+		})
+	}
+
+	if *inputFilePath == "" {
+		processFile(*inputFilePath, *overwrite)
+		fmt.Println(*inputFilePath)
+	}
+}
+
+func processFile(filePath string, overwrite bool) {
 	// Read the input file
-	inputFile, err := os.Open(*inputFilePath)
+	fmt.Printf("Processing '%s'\n", filePath)
+	inputFile, err := os.Open(filePath)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
 		os.Exit(1)
@@ -55,7 +81,7 @@ func main() {
 	}
 
 	layerCount := countLayers(lines)
-	fmt.Printf("File '%s' has %d layers\n", *inputFilePath, layerCount)
+	fmt.Printf("File '%s' has %d layers\n", filePath, layerCount)
 
 	mapLayerLines = getMapOfLayerStartLines(lines)
 	// fmt.Printf("mapLayerLines: %+v\n", mapLayerLines)
@@ -71,18 +97,18 @@ func main() {
 	maxFanSpeed := getMaxFanSpeed(lines)
 	for _, layer := range probLayers {
 		// Decrease the fan speed & increase the temp for the layer below
-		lines = modifyGcodeFanSpeed(lines, layer-2, FAN_SPEED_PCT_PROB_LAYERS)
-		lines = modifyGcodeTemperature(lines, layer-2, defaultTemp+TEMP_INCREASE_PROB_LAYERS)
+		lines = modifyGcodeFanSpeed(lines, layer-3, FAN_SPEED_PCT_PROB_LAYERS)
+		lines = modifyGcodeTemperature(lines, layer-3, defaultTemp+TEMP_INCREASE_PROB_LAYERS)
 
 		// Reset the fan speed & temp for the layer above
-		lines = modifyGcodeFanSpeed(lines, layer+1, maxFanSpeed)
-		lines = modifyGcodeTemperature(lines, layer+1, defaultTemp)
+		lines = modifyGcodeFanSpeed(lines, layer+2, maxFanSpeed)
+		lines = modifyGcodeTemperature(lines, layer+2, defaultTemp)
 	}
 
 	// Save the modified lines to a new file
-	outputFilePath := strings.Replace(*inputFilePath, ".gcode", "_modified.gcode", 1)
-	if *overwrite {
-		outputFilePath = *inputFilePath
+	outputFilePath := strings.Replace(filePath, ".gcode", "_modified.gcode", 1)
+	if overwrite {
+		outputFilePath = filePath
 	}
 	outputFile, err := os.Create(outputFilePath)
 	if err != nil {
