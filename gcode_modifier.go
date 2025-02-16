@@ -15,20 +15,18 @@ var mapLayerLines map[int]int
 var mapSupportOnlyLayers map[int]bool
 
 const (
-	MIN_PREV_PERIM      = 10.0
-	PERIM_PCT_CHG_UPPER = -50.0
-	PERIM_PCT_CHG_LOWER = -95.0
-	MIN_PROB_LAYER      = 20 // Ignore "problematic" layers below this
+	MIN_PREV_PERIM            = 10.0
+	PERIM_PCT_CHG_UPPER       = -50.0
+	PERIM_PCT_CHG_LOWER       = -95.0
+	MIN_PROB_LAYER            = 20 // Ignore "problematic" layers below this
+	FAN_SPEED_PCT_PROB_LAYERS = 10 // Percent
+	TEMP_INCREASE_PROB_LAYERS = 10 // Celcius
 )
 
 func main() {
 	// Define command-line flags
-	inputFilePath := flag.String("file", "", "Path to the input G-code file")
-	layerNumber := flag.Int("layer", 0, "Layer number to modify")
-	mode := flag.String("mode", "temperature", "Mode: 'temperature', 'fanspeed', or 'analyze'")
-	value := flag.Float64("value", 0, "Temperature (in °C), fan speed (0-100), or threshold percentage (e.g., 99.9) for 'analyze-model-only' mode")
-	save := flag.Bool("save", false, "Save to new file (Default: false)")
-	// modelOnly := flag.Bool("model", true, "Model only - ignore supports (Default: true)")
+	inputFilePath := flag.String("f", "", "Path to the input G-code file")
+	overwrite := flag.Bool("o", false, "Overwrite existing G-code file (Default=false)")
 
 	flag.Parse()
 
@@ -66,33 +64,38 @@ func main() {
 	// fmt.Printf("mapSupportOnlyLayers: %+v\n", mapSupportOnlyLayers)
 
 	// Process the file based on the selected mode
-	var outputLines []string
-	switch *mode {
-	case "temp":
-		outputLines = modifyGcodeTemperature(lines, *layerNumber, int(*value))
-	case "fan":
-		outputLines = modifyGcodeFanSpeed(lines, *layerNumber, int(*value))
-	default: // analyze
-		layers := detectProblematicLayers(lines)
-		fmt.Printf("Problematic layers: %v\n", layers)
+	probLayers := detectProblematicLayers(lines)
+	fmt.Printf("Problematic layers: %v\n", probLayers)
+
+	defaultTemp := getDefaultTemp(lines)
+	maxFanSpeed := getMaxFanSpeed(lines)
+	for _, layer := range probLayers {
+		// Decrease the fan speed & increase the temp for the layer below
+		lines = modifyGcodeFanSpeed(lines, layer-2, FAN_SPEED_PCT_PROB_LAYERS)
+		lines = modifyGcodeTemperature(lines, layer-2, defaultTemp+TEMP_INCREASE_PROB_LAYERS)
+
+		// Reset the fan speed & temp for the layer above
+		lines = modifyGcodeFanSpeed(lines, layer+1, maxFanSpeed)
+		lines = modifyGcodeTemperature(lines, layer+1, defaultTemp)
 	}
 
 	// Save the modified lines to a new file
-	if *save {
-		outputFilePath := strings.Replace(*inputFilePath, ".gcode", fmt.Sprintf("_modified_%s.gcode", *mode), 1)
-		outputFile, err := os.Create(outputFilePath)
-		if err != nil {
-			fmt.Printf("Error creating output file: %v\n", err)
-			os.Exit(1)
-		}
-		defer outputFile.Close()
-
-		for _, line := range outputLines {
-			outputFile.WriteString(line + "\n")
-		}
-
-		fmt.Printf("Modification complete. New file saved as %s.\n", outputFilePath)
+	outputFilePath := strings.Replace(*inputFilePath, ".gcode", "_modified.gcode", 1)
+	if *overwrite {
+		outputFilePath = *inputFilePath
 	}
+	outputFile, err := os.Create(outputFilePath)
+	if err != nil {
+		fmt.Printf("Error creating output file: %v\n", err)
+		os.Exit(1)
+	}
+	defer outputFile.Close()
+
+	for _, line := range lines {
+		outputFile.WriteString(line + "\n")
+	}
+
+	fmt.Printf("Modification complete. New file saved as %s.\n", outputFilePath)
 }
 
 func detectLayerChange(line string) bool {
@@ -116,6 +119,34 @@ func extractZValue(line string) (float64, error) {
 // calculateDistance calculates the distance between two points in the XY plane.
 func calculateDistance(x1, y1, x2, y2 float64) float64 {
 	return math.Sqrt(math.Pow(x2-x1, 2) + math.Pow(y2-y1, 2))
+}
+
+// getDefaultTemp gets the overall nozzle temp (e.g. "; nozzle_temperature = 235")
+func getDefaultTemp(lines []string) int {
+	var tempC = 0
+	for _, line := range lines {
+		// e.g. "; nozzle_temperature = 235"
+		if strings.HasPrefix(line, "; nozzle_temperature = ") {
+			strTemp := strings.Split(line, " = ")[1]
+			tempC, _ = strconv.Atoi(strTemp)
+			break
+		}
+	}
+	return tempC
+}
+
+// getMaxFanSpeed gets the overall max cooling fan speed
+func getMaxFanSpeed(lines []string) int {
+	var fanSpeed = 0
+	for _, line := range lines {
+		// e.g. "; fan_max_speed = 100"
+		if strings.HasPrefix(line, "; fan_max_speed = ") {
+			strTemp := strings.Split(line, " = ")[1]
+			fanSpeed, _ = strconv.Atoi(strTemp)
+			break
+		}
+	}
+	return fanSpeed
 }
 
 // countLayers uses detectLayerChange() to count the layers
@@ -269,43 +300,3 @@ func detectProblematicLayers(lines []string) []int {
 
 	return problematicLayers
 }
-
-// func analyzeGcode(lines []string) {
-// 	currentLayer := -1
-// 	previousPerimeterLength := 0.0
-// 	currentPerimeterLength := 0.0
-// 	var lastX, lastY float64
-// 	extruding := false
-// 	for lineNumber, line := range lines {
-// 		if detectLayerChange(line) {
-// 			if currentLayer >= 0 && previousPerimeterLength > 50.0 && math.Abs(currentPerimeterLength-previousPerimeterLength)/previousPerimeterLength > PERIMETER_DIFF_THRESHOLD {
-// 				fmt.Printf("Line %d: Suggestion: Increase temperature by 10°C to improve adhesion at layer %d\n", lineNumber+1, currentLayer)
-// 			}
-// 			previousPerimeterLength = currentPerimeterLength
-// 			currentPerimeterLength = 0.0
-// 			currentLayer++
-// 		} else if strings.HasPrefix(line, "G1") {
-// 			// Extract X, Y values and calculate perimeter length
-// 			var x, y float64
-// 			var hasX, hasY bool
-// 			fields := strings.Fields(line)
-// 			for _, field := range fields {
-// 				switch field[0] {
-// 				case 'X':
-// 					x, _ = strconv.ParseFloat(field[1:], 64)
-// 					hasX = true
-// 				case 'Y':
-// 					y, _ = strconv.ParseFloat(field[1:], 64)
-// 					hasY = true
-// 				}
-// 			}
-// 			if hasX && hasY {
-// 				if extruding {
-// 					currentPerimeterLength += calculateDistance(lastX, lastY, x, y)
-// 				}
-// 				extruding = true
-// 				lastX, lastY = x, y
-// 			}
-// 		}
-// 	}
-// }
